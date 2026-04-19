@@ -1,0 +1,51 @@
+services:
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - db_data:/app/data
+      - obsidian_data:/obsidian
+    environment:
+      - DB_PATH=/app/data/trades.db
+      - OBSIDIAN_VAULT_PATH=/obsidian
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    env_file: .env
+    volumes:
+      - db_data:/app/data
+      - obsidian_data:/obsidian
+    environment:
+      - DB_PATH=/app/data/trades.db
+      - OBSIDIAN_VAULT_PATH=/obsidian
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "5173:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  obsidian_data:

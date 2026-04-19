@@ -1,0 +1,7 @@
+metaapi-cloud-sdk
+fastapi
+uvicorn[standard]
+anthropic
+pandas
+numpy
+python-dotenv

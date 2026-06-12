@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+venv/
+.venv/
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Node / dashboard
+dashboard/node_modules/
+dashboard/dist/
+
+# OS
+.DS_Store

@@ -6,8 +6,8 @@ COPY dashboard/package.json ./
 RUN npm install
 
 COPY dashboard/ ./
-# API URL ชี้ไป server container
-ENV VITE_API_URL=http://localhost:8000
+# ปล่อย VITE_API_URL ว่าง → frontend ใช้ relative /api ผ่าน nginx proxy
+# (ถ้า bake localhost:8000 จะ bypass proxy + พังตอน deploy ไกล)
 RUN npm run build
 
 # Serve stage

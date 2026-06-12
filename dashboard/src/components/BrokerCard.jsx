@@ -3,7 +3,8 @@ import { useAPI } from '../hooks/useAPI'
 export default function BrokerCard() {
   const { data, loading, offline } = useAPI('/api/status', { refreshMs: 10000 })
   const account = data?.account || {}
-  const running = data?.bot_running
+  // เขียว = ต่อ broker ได้ (bot รันหรือไม่ก็ตาม)
+  const running = data?.broker_connected ?? data?.bot_running
 
   const floating = account.floating ?? 0
   const floatColor = floating >= 0 ? 'var(--green)' : 'var(--red)'

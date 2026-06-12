@@ -208,17 +208,20 @@ class SMCStrategy:
     def _get_latest_swing_pair(
         self, swings: dict, direction: str
     ) -> tuple[Optional[float], Optional[float]]:
-        """หา swing low/high คู่ล่าสุดสำหรับ draw Fibonacci"""
+        """หา swing low/high คู่ล่าสุดสำหรับ draw Fibonacci
+        คืน (swing_low_price, swing_high_price) เสมอ — draw_fib จัดการทิศตาม direction เอง
+        ใช้ swing ล่าสุดของแต่ละฝั่งเพื่อ leg ที่สดใหม่ (ไม่ใช่ extreme ทั้งช่วง)
+        """
         highs = [p for _, p in swings.get("highs", [])]
         lows = [p for _, p in swings.get("lows", [])]
 
         if not highs or not lows:
             return None, None
 
-        if direction == "BUY":
-            return min(lows[-3:]), max(highs[-3:])
-        else:
-            return min(lows[-3:]), max(highs[-3:])
+        swing_low = lows[-1]
+        swing_high = highs[-1]
+        # กันกรณี low/high สลับกัน ให้ค่าเรียงถูกเสมอ
+        return min(swing_low, swing_high), max(swing_low, swing_high)
 
     def generate_signal(
         self,

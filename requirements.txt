@@ -1,7 +1,8 @@
-metaapi-cloud-sdk
-fastapi
-uvicorn[standard]
-anthropic
-pandas
-numpy
-python-dotenv
+metaapi-cloud-sdk==29.1.1
+MetaTrader5==5.0.5260; sys_platform == 'win32'
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+anthropic==0.109.1
+pandas==3.0.1
+numpy==2.4.2
+python-dotenv==1.0.1

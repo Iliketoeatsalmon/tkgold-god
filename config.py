@@ -7,12 +7,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Broker backend ───────────────────────────────
+# "metaapi" = cloud (เสียเงิน), "mt5" = MetaTrader5 terminal บน Windows (ฟรี)
+BROKER_BACKEND: str = os.getenv("BROKER_BACKEND", "metaapi")
+
 # MetaApi credentials
 METAAPI_TOKEN: str = os.getenv("METAAPI_TOKEN", "")
 ACCOUNT_ID: str = os.getenv("ACCOUNT_ID", "")
 
+# MT5 direct (Windows เท่านั้น) — เว้นว่าง login/password/server
+# ถ้า MT5 terminal login ค้างไว้อยู่แล้ว (จะ attach เข้า terminal ที่เปิดอยู่)
+MT5_LOGIN: str = os.getenv("MT5_LOGIN", "")
+MT5_PASSWORD: str = os.getenv("MT5_PASSWORD", "")
+MT5_SERVER: str = os.getenv("MT5_SERVER", "")
+MT5_TERMINAL_PATH: str = os.getenv("MT5_TERMINAL_PATH", "")  # path terminal64.exe (optional)
+
 # สัญลักษณ์และ timeframe ที่ใช้วิเคราะห์
-SYMBOL: str = "XAUUSD"
+# บาง broker ใช้ชื่อต่างกัน เช่น XAUUSDm, GOLD — override ผ่าน .env ได้
+SYMBOL: str = os.getenv("SYMBOL", "XAUUSD")
 TIMEFRAMES: list[str] = ["1h", "15min", "5min"]
 
 # การจัดการขนาด lot และความเสี่ยง
@@ -38,8 +50,21 @@ MIN_RR_RATIO: float = 2.0
 # วนลูปทุก 5 นาที
 LOOP_INTERVAL_SECONDS: int = 300
 
+# ── AI provider ──────────────────────────────────
+# "anthropic" = Claude API (ต้องมี key), "ollama" = local model บนเครื่อง
+AI_PROVIDER: str = os.getenv("AI_PROVIDER", "anthropic")
+
 # Claude API key สำหรับ AI analysis
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+
+# Ollama (local) endpoint
+OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+# model id — default ต่างกันตาม provider
+AI_MODEL: str = os.getenv(
+    "AI_MODEL",
+    "qwen2.5:7b" if AI_PROVIDER == "ollama" else "claude-opus-4-8",
+)
 
 # path ของ Obsidian vault สำหรับบันทึก journal
 OBSIDIAN_VAULT_PATH: str = os.getenv(

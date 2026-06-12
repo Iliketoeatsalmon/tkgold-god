@@ -2,9 +2,10 @@
 obsidian_writer.py — เขียน trading journal ลง Obsidian vault
 สร้างไฟล์ .md สำหรับแต่ละ trade, สรุปรายวัน, และ performance note
 """
+from __future__ import annotations
 import logging
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from config import OBSIDIAN_VAULT_PATH
 
@@ -50,12 +51,12 @@ class ObsidianWriter:
         ไฟล์: trades/YYYY-MM-DD_XAUUSD_BUY.md
         """
         direction = order.get("direction", "")
-        timestamp = order.get("timestamp", datetime.utcnow().isoformat())
+        timestamp = order.get("timestamp", datetime.now(timezone.utc).isoformat())
 
         try:
             dt = datetime.fromisoformat(timestamp)
         except Exception:
-            dt = datetime.utcnow()
+            dt = datetime.now(timezone.utc)
 
         date_str = dt.strftime("%Y-%m-%d")
         time_str = dt.strftime("%H:%M")
@@ -173,7 +174,7 @@ Close Price: {order.get('close_price', 'ยังไม่ปิด')}
         อัปเดต strategy/performance.md ด้วย AI progress ล่าสุด
         """
         version = ai_progress.get("version", 1)
-        timestamp = ai_progress.get("timestamp", datetime.utcnow().isoformat())
+        timestamp = ai_progress.get("timestamp", datetime.now(timezone.utc).isoformat())
         win_rate = ai_progress.get("win_rate", 0)
         total = ai_progress.get("total_trades", 0)
         total_pnl = ai_progress.get("total_pnl", 0)

@@ -4,7 +4,7 @@ db.py — จัดการ SQLite database ทั้งหมดของร�
 """
 import sqlite3
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 from config import DB_PATH
 
@@ -119,7 +119,7 @@ def save_signal(signal: dict) -> int:
                 (:timestamp, :tf, :direction, :fib_hit, :fvg, :choch, :bos,
                  :confidence, :entry, :sl, :tp, :rr, :reason, :executed, :broker)
         """, {
-            "timestamp":  signal.get("timestamp", datetime.utcnow().isoformat()),
+            "timestamp":  signal.get("timestamp", datetime.now(timezone.utc).isoformat()),
             "tf":         signal.get("tf", ""),
             "direction":  signal.get("direction", ""),
             "fib_hit":    signal.get("fib_hit"),
@@ -157,7 +157,7 @@ def save_order(order: dict) -> int:
                 (:timestamp, :broker, :symbol, :direction, :lot, :entry,
                  :sl, :tp, :close_price, :pnl, :status, :metaapi_id, :signal_id)
         """, {
-            "timestamp":   order.get("timestamp", datetime.utcnow().isoformat()),
+            "timestamp":   order.get("timestamp", datetime.now(timezone.utc).isoformat()),
             "broker":      order.get("broker", ""),
             "symbol":      order.get("symbol", "XAUUSD"),
             "direction":   order.get("direction", ""),
@@ -200,6 +200,26 @@ def update_order(order_id: int, updates: dict) -> None:
         conn.close()
 
 
+def update_signal(signal_id: int, updates: dict) -> None:
+    """อัปเดต field ใน signal (เช่น executed). คนละตารางกับ orders"""
+    if not updates:
+        return
+    conn = get_connection()
+    try:
+        set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+        updates["signal_id"] = signal_id
+        conn.execute(
+            f"UPDATE signals SET {set_clause} WHERE id = :signal_id",
+            updates
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"update_signal error: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 def save_ai_progress(progress: dict) -> int:
     """บันทึกผล AI progress version ใหม่"""
     conn = get_connection()
@@ -213,7 +233,7 @@ def save_ai_progress(progress: dict) -> int:
                 (:timestamp, :version, :win_rate, :total_trades, :total_pnl,
                  :sharpe, :max_drawdown, :note)
         """, {
-            "timestamp":    datetime.utcnow().isoformat(),
+            "timestamp":    datetime.now(timezone.utc).isoformat(),
             "version":      progress.get("version", 1),
             "win_rate":     progress.get("win_rate", 0),
             "total_trades": progress.get("total_trades", 0),

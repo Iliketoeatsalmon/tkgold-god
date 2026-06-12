@@ -1,23 +1,24 @@
 """
-bot.py — หัวใจหลักของระบบ เชื่อม MetaApi และรัน trading loop
+bot.py — หัวใจหลักของระบบ รัน trading loop
+broker backend (MetaApi/MT5) เลือกผ่าน BROKER_BACKEND ใน .env
 รองรับ graceful shutdown ด้วย Ctrl+C และ auto-reconnect
 """
 import asyncio
 import logging
 import signal
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
 
 import pandas as pd
 
 from config import (
-    METAAPI_TOKEN, ACCOUNT_ID, SYMBOL,
+    SYMBOL,
     LOT_SIZE, LOOP_INTERVAL_SECONDS, MIN_CONFIDENCE,
-    CANDLE_BARS, METAAPI_RETRY_DELAY, METAAPI_MAX_RETRIES,
-    AI_PROGRESS_CYCLE, ANTHROPIC_API_KEY,
+    CANDLE_BARS, AI_PROGRESS_CYCLE,
 )
 import db
+from broker import broker
 from strategy import SMCStrategy
 from risk import RiskManager
 from obsidian_writer import ObsidianWriter
@@ -40,123 +41,38 @@ class XAUBot:
         self.strategy = SMCStrategy()
         self.risk = RiskManager()
         self.obsidian = ObsidianWriter()
-        self.connection = None
-        self.api = None
-        self.account = None
+        self.broker = broker  # backend เลือกจาก BROKER_BACKEND
         self.running = False
         self.cycle_count = 0
         self.current_signal: dict = {}
         self.account_info: dict = {}
 
     # ──────────────────────────────────────────────
-    # MetaApi connection
+    # Broker connection (delegate ไป broker layer)
     # ──────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """เชื่อม MetaApi พร้อม retry อัตโนมัติ"""
-        from metaapi_cloud_sdk import MetaApi  # type: ignore
-
-        for attempt in range(1, METAAPI_MAX_RETRIES + 1):
-            try:
-                logger.info(f"เชื่อม MetaApi... (ครั้งที่ {attempt})")
-                self.api = MetaApi(METAAPI_TOKEN)
-                self.account = await self.api.metatrader_account_api.get_account(ACCOUNT_ID)
-
-                # รอ account deploy
-                if self.account.state not in ("DEPLOYED", "DEPLOYING"):
-                    await self.account.deploy()
-                await self.account.wait_connected()
-
-                self.connection = self.account.get_rpc_connection()
-                await self.connection.connect()
-                await self.connection.wait_synchronized()
-
-                logger.info("✅ เชื่อม MetaApi สำเร็จ")
-                return
-
-            except Exception as e:
-                logger.error(f"เชื่อม MetaApi ล้มเหลว: {e}")
-                if attempt < METAAPI_MAX_RETRIES:
-                    logger.info(f"รอ {METAAPI_RETRY_DELAY}s แล้วลองใหม่...")
-                    await asyncio.sleep(METAAPI_RETRY_DELAY)
-                else:
-                    raise RuntimeError(
-                        f"เชื่อม MetaApi ไม่ได้หลัง {METAAPI_MAX_RETRIES} ครั้ง"
-                    )
-
-    async def _ensure_connected(self) -> None:
-        """ตรวจ connection ถ้าหลุดให้ reconnect"""
-        try:
-            if self.connection is None or not self.connection.synchronized:
-                logger.warning("Connection หลุด — กำลัง reconnect...")
-                await self.connect()
-        except Exception as e:
-            logger.error(f"_ensure_connected error: {e}")
-            raise
-
-    # ──────────────────────────────────────────────
-    # ดึงข้อมูล market
-    # ──────────────────────────────────────────────
+        """เชื่อม broker — raise ถ้าไม่สำเร็จ"""
+        ok = await self.broker.connect()
+        if not ok:
+            raise RuntimeError("เชื่อม broker ไม่สำเร็จ — เช็ค config/credentials")
 
     async def get_candles(self, tf: str, bars: int = CANDLE_BARS) -> pd.DataFrame:
-        """ดึง candle data จาก MetaApi แปลงเป็น DataFrame"""
-        await self._ensure_connected()
-
-        # map timeframe string → MetaApi format
-        tf_map = {"1h": "1h", "15min": "15m", "5min": "5m", "H1": "1h", "M15": "15m", "M5": "5m"}
-        api_tf = tf_map.get(tf, tf)
-
-        candles = await self.connection.get_historical_candles(
-            SYMBOL, api_tf, datetime.utcnow(), bars
-        )
-
-        rows = []
-        for c in candles:
-            rows.append({
-                "time":  c.get("time"),
-                "open":  float(c.get("open", 0)),
-                "high":  float(c.get("high", 0)),
-                "low":   float(c.get("low", 0)),
-                "close": float(c.get("close", 0)),
-                "volume": float(c.get("tickVolume", 0)),
-            })
-
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df["time"] = pd.to_datetime(df["time"])
-            df.sort_values("time", inplace=True)
-            df.reset_index(drop=True, inplace=True)
-
+        """ดึง candle data เป็น DataFrame"""
+        df = await self.broker.get_candles(tf, bars)
         logger.debug(f"ดึง {len(df)} candles [{tf}]")
         return df
 
     async def get_account_info(self) -> dict:
         """ดึง balance, equity, floating pnl"""
-        await self._ensure_connected()
-        try:
-            info = await self.connection.get_account_information()
-            result = {
-                "balance":  float(info.get("balance", 0)),
-                "equity":   float(info.get("equity", 0)),
-                "floating": float(info.get("equity", 0)) - float(info.get("balance", 0)),
-                "currency": info.get("currency", "USD"),
-                "broker":   info.get("broker", ""),
-                "server":   info.get("server", ""),
-            }
-            self.account_info = result
-            return result
-        except Exception as e:
-            logger.error(f"get_account_info error: {e}")
-            return self.account_info  # return cached ถ้า error
+        info = await self.broker.get_account_info()
+        if info:
+            self.account_info = info
+        return self.account_info
 
     async def get_open_positions(self) -> list:
         """ดึง positions ที่ยังเปิดอยู่"""
-        await self._ensure_connected()
-        try:
-            return await self.connection.get_positions()
-        except Exception as e:
-            logger.error(f"get_open_positions error: {e}")
-            return []
+        return await self.broker.get_open_positions()
 
     # ──────────────────────────────────────────────
     # Order management
@@ -164,57 +80,94 @@ class XAUBot:
 
     async def place_order(self, signal: dict, lot: float) -> Optional[dict]:
         """ส่ง market order พร้อม SL/TP ไปยัง broker"""
-        await self._ensure_connected()
-
-        try:
-            direction = signal["direction"]
-            entry = signal["entry"]
-            sl = signal["sl"]
-            tp = signal["tp"]
-
-            if direction == "BUY":
-                result = await self.connection.create_market_buy_order(
-                    SYMBOL, lot, sl, tp,
-                    {"comment": "SMC-AI-Bot", "clientId": "xaubot"}
-                )
-            else:
-                result = await self.connection.create_market_sell_order(
-                    SYMBOL, lot, sl, tp,
-                    {"comment": "SMC-AI-Bot", "clientId": "xaubot"}
-                )
-
-            logger.info(f"✅ Order ส่งสำเร็จ: {direction} {lot} lots @ {entry}")
-            return result
-
-        except Exception as e:
-            logger.error(f"place_order error: {e}")
-            return None
+        direction = signal["direction"]
+        result = await self.broker.place_market_order(
+            direction, lot, signal["sl"], signal["tp"]
+        )
+        if result:
+            logger.info(f"✅ Order ส่งสำเร็จ: {direction} {lot} lots @ {signal['entry']}")
+        return result
 
     async def close_position(self, position_id: str) -> bool:
         """ปิด position ตาม id"""
-        await self._ensure_connected()
-        try:
-            await self.connection.close_position(position_id)
+        ok = await self.broker.close_position(position_id)
+        if ok:
             logger.info(f"ปิด position {position_id} สำเร็จ")
-            return True
-        except Exception as e:
-            logger.error(f"close_position error: {e}")
-            return False
+        return ok
 
     # ──────────────────────────────────────────────
-    # AI analysis (Claude)
+    # Order reconciliation (sync broker → DB)
+    # ──────────────────────────────────────────────
+
+    async def reconcile_orders(self) -> None:
+        """sync order ที่ปิดที่ broker กลับเข้า DB + อัปเดต pnl และ daily stats"""
+        try:
+            open_orders = db.get_orders(limit=1000, status="open")
+            if not open_orders:
+                return
+
+            positions = await self.get_open_positions()
+            live_ids = set()
+            for p in positions:
+                pid = getattr(p, "id", None)
+                if pid is None and isinstance(p, dict):
+                    pid = p.get("id")
+                if pid is not None:
+                    live_ids.add(str(pid))
+
+            # order ที่ DB ว่า open แต่ broker ไม่มีแล้ว = ปิดไปแล้ว
+            for o in open_orders:
+                mid = str(o.get("metaapi_id") or "")
+                if mid and mid not in live_ids:
+                    pnl, close_price = await self._fetch_closed_pnl(mid)
+                    db.update_order(o["id"], {
+                        "status":      "closed",
+                        "pnl":         pnl,
+                        "close_price": close_price,
+                    })
+                    logger.info(f"Order {o['id']} ปิดแล้ว pnl={pnl}")
+
+            self._refresh_daily_stats()
+
+        except Exception as e:
+            logger.error(f"reconcile_orders error: {e}")
+
+    async def _fetch_closed_pnl(self, position_id: str) -> tuple[float, Optional[float]]:
+        """ดึง pnl รวมของ position ที่ปิดแล้วจาก deals (best-effort)"""
+        try:
+            deals = await self.broker.get_deals_by_position(position_id)
+            pnl = sum(d["profit"] for d in deals)
+            close_price = deals[-1]["price"] if deals else None
+            return round(pnl, 2), close_price
+        except Exception as e:
+            logger.warning(f"_fetch_closed_pnl error ({position_id}): {e}")
+            return 0.0, None
+
+    def _refresh_daily_stats(self) -> None:
+        """คำนวณสถิติวันนี้จาก closed orders แล้ว upsert (ใช้กับ daily loss limit)"""
+        try:
+            today = date.today().isoformat()
+            closed = db.get_orders(limit=1000, status="closed")
+            todays = [o for o in closed if str(o.get("timestamp", "")).startswith(today)]
+            wins = sum(1 for o in todays if (o.get("pnl") or 0) > 0)
+            losses = sum(1 for o in todays if (o.get("pnl") or 0) <= 0)
+            pnl = round(sum((o.get("pnl") or 0) for o in todays), 2)
+            db.upsert_daily_stats({
+                "total_trades": len(todays),
+                "wins":         wins,
+                "losses":       losses,
+                "pnl":          pnl,
+            })
+        except Exception as e:
+            logger.error(f"_refresh_daily_stats error: {e}")
+
+    # ──────────────────────────────────────────────
+    # AI analysis (Claude / local model)
     # ──────────────────────────────────────────────
 
     async def get_ai_analysis(self, signal: dict) -> str:
-        """เรียก Claude API วิเคราะห์ signal เป็นภาษาไทย"""
-        if not ANTHROPIC_API_KEY:
-            return "ไม่มี ANTHROPIC_API_KEY"
-
-        try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-            prompt = f"""วิเคราะห์ signal XAUUSD นี้เป็นภาษาไทย:
+        """วิเคราะห์ signal เป็นภาษาไทย ผ่าน AI provider ที่ตั้งค่าไว้ (Claude หรือ local)"""
+        prompt = f"""วิเคราะห์ signal XAUUSD นี้เป็นภาษาไทย:
 
 Direction: {signal.get('direction')}
 Confidence: {signal.get('confidence')}%
@@ -232,13 +185,10 @@ BOS: {signal.get('bos')}
 
 กรุณาวิเคราะห์ว่า setup นี้ดีหรือไม่ มีความเสี่ยงอะไร และแนะนำการจัดการ trade"""
 
-            message = client.messages.create(
-                model="claude-opus-4-7",
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return message.content[0].text
-
+        try:
+            import ai
+            # ai.analyze เป็น blocking I/O — รันใน thread แยกไม่ให้ block event loop
+            return await asyncio.to_thread(ai.analyze, prompt, 800)
         except Exception as e:
             logger.error(f"AI analysis error: {e}")
             return f"วิเคราะห์ไม่ได้: {e}"
@@ -331,7 +281,7 @@ BOS: {signal.get('bos')}
 
                 # 2. สร้าง signal จาก SMC strategy
                 signal = self.strategy.generate_signal(df_h1, df_m15, df_m5)
-                signal["timestamp"] = datetime.utcnow().isoformat()
+                signal["timestamp"] = datetime.now(timezone.utc).isoformat()
                 self.current_signal = signal
 
                 logger.info(
@@ -341,6 +291,9 @@ BOS: {signal.get('bos')}
 
                 # 3. บันทึก signal ลง DB
                 signal_id = db.save_signal(signal)
+
+                # 3.5 sync order ที่ปิดที่ broker + refresh daily stats (ก่อนเช็ค risk)
+                await self.reconcile_orders()
 
                 # 4. ตรวจ risk conditions
                 account = await self.get_account_info()
@@ -376,8 +329,8 @@ BOS: {signal.get('bos')}
                             "signal_id":  signal_id,
                         })
 
-                        # mark signal as executed
-                        db.update_order(signal_id, {"executed": 1})
+                        # mark signal as executed (อยู่ตาราง signals ไม่ใช่ orders)
+                        db.update_signal(signal_id, {"executed": 1})
 
                         logger.info(f"✅ Order บันทึก DB id={order_id}")
 

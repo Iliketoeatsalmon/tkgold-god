@@ -7,16 +7,17 @@ import json
 import logging
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
-import anthropic
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import ai
 import db
-from config import ANTHROPIC_API_KEY, WS_PUSH_INTERVAL, SYMBOL
+from broker import broker
+from config import ANTHROPIC_API_KEY, AI_PROVIDER, WS_PUSH_INTERVAL, SYMBOL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,9 +35,16 @@ _ws_clients: list[WebSocket] = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """เตรียม DB เมื่อ startup"""
+    """เตรียม DB + เชื่อม broker เมื่อ startup"""
     db.init_db()
     logger.info("Server เริ่มทำงาน DB ready")
+
+    # เชื่อม MetaApi แบบ background — ไม่ block server start
+    if broker.configured:
+        asyncio.create_task(broker.connect())
+    else:
+        logger.warning("METAAPI_TOKEN/ACCOUNT_ID ไม่ครบ — dashboard จะไม่เห็น account จริง")
+
     yield
     logger.info("Server shutdown")
 
@@ -50,7 +58,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # "*" + credentials=True ผิด spec, browser ปฏิเสธ
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,16 +87,21 @@ async def get_status():
         account_info = getattr(_bot_instance, "account_info", {})
         current_signal = getattr(_bot_instance, "current_signal", {})
 
+    # ไม่มี bot in-process → ดึง account จริงผ่าน broker connection ของ server
+    if not account_info and broker.configured:
+        account_info = await broker.get_account_info()
+
     # ดึง signal ล่าสุดจาก DB ถ้า bot ไม่รัน
     if not current_signal:
         signals = db.get_signals(limit=1)
         current_signal = signals[0] if signals else {}
 
     return {
-        "bot_running":    bot_running,
-        "account":        account_info,
-        "current_signal": current_signal,
-        "timestamp":      datetime.utcnow().isoformat(),
+        "bot_running":      bot_running,
+        "broker_connected": broker.connected or bool(_bot_instance),
+        "account":          account_info,
+        "current_signal":   current_signal,
+        "timestamp":        datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -129,6 +142,14 @@ async def get_order_stats():
     return db.get_order_stats()
 
 
+@app.get("/api/positions")
+async def get_positions():
+    """Positions ที่เปิดอยู่จริงจาก broker"""
+    if not broker.configured:
+        return []
+    return await broker.get_open_positions()
+
+
 # ──────────────────────────────────────────────
 # Analytics
 # ──────────────────────────────────────────────
@@ -157,8 +178,8 @@ async def get_daily_stats(limit: int = 30):
 
 @app.post("/api/ai-analysis")
 async def ai_analysis(body: AIAnalysisRequest):
-    """เรียก Claude API วิเคราะห์ signal เป็นภาษาไทย"""
-    if not ANTHROPIC_API_KEY:
+    """วิเคราะห์ signal ผ่าน AI provider ที่ตั้งค่าไว้ (Claude หรือ local model)"""
+    if AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
         raise HTTPException(400, "ไม่มี ANTHROPIC_API_KEY")
 
     signal = db.get_signal_by_id(body.signal_id)
@@ -166,8 +187,6 @@ async def ai_analysis(body: AIAnalysisRequest):
         raise HTTPException(404, f"ไม่พบ signal id={body.signal_id}")
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
         prompt = f"""วิเคราะห์ signal XAUUSD นี้เป็นภาษาไทยอย่างละเอียด:
 
 Direction: {signal.get('direction')}
@@ -189,21 +208,14 @@ BOS: {'ใช่' if signal.get('bos') else 'ไม่'}
 2. ความเสี่ยงและจุดอ่อน
 3. แนะนำการ manage trade"""
 
-        message = client.messages.create(
-            model="claude-opus-4-7",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        analysis = message.content[0].text
+        # ai.analyze เป็น blocking I/O — รันใน thread แยกไม่ให้ block event loop
+        analysis = await asyncio.to_thread(ai.analyze, prompt, 1000)
         return {
             "signal_id": body.signal_id,
             "analysis":  analysis,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    except anthropic.APIError as e:
-        raise HTTPException(502, f"Claude API error: {e}")
     except Exception as e:
         logger.error(f"ai_analysis error: {e}")
         raise HTTPException(500, str(e))
@@ -226,16 +238,18 @@ async def websocket_live(ws: WebSocket):
             signals = db.get_signals(limit=1)
             latest = signals[0] if signals else {}
 
-            # account info จาก bot หรือ dummy
+            # account info จาก bot ก่อน, ไม่มีก็ใช้ broker ของ server
             account = {}
             if _bot_instance:
                 account = getattr(_bot_instance, "account_info", {})
+            if not account and broker.configured:
+                account = await broker.get_account_info()
 
             payload = {
                 "type":      "update",
                 "signal":    latest,
                 "account":   account,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
             await ws.send_text(json.dumps(payload, default=str))
@@ -256,7 +270,7 @@ async def websocket_live(ws: WebSocket):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 if __name__ == "__main__":
